@@ -32,14 +32,19 @@ class TelemetryProcessor:
     def validate(self, msg: TelemetryMessage, now: float) -> IngestResult | None:
         """负载层面校验；返回 None 表示通过，否则返回可区分的拒绝结果。"""
         if msg.protocol_version not in SUPPORTED_PROTOCOL_VERSIONS:
-            return IngestResult(accepted=False,
-                                reject_reason=RejectReason.UNKNOWN_PROTOCOL_VERSION)
+            return IngestResult(
+                accepted=False,
+                reject_reason=RejectReason.UNKNOWN_PROTOCOL_VERSION,
+                detail=f"unsupported_protocol_version:{msg.protocol_version}")
         if not isinstance(msg.payload, dict) or not msg.payload:
-            return IngestResult(accepted=False,
-                                reject_reason=RejectReason.MALFORMED_PAYLOAD)
+            return IngestResult(
+                accepted=False, reject_reason=RejectReason.MALFORMED_PAYLOAD,
+                detail="payload must be a non-empty object")
         if abs(msg.timestamp - now) > self._max_skew:
-            return IngestResult(accepted=False,
-                                reject_reason=RejectReason.STALE_TIMESTAMP)
+            return IngestResult(
+                accepted=False, reject_reason=RejectReason.STALE_TIMESTAMP,
+                detail=f"clock_skew_exceeded:{abs(msg.timestamp - now):.1f}s"
+                       f" > {self._max_skew:.1f}s")
         return None
 
     def classify(self, msg: TelemetryMessage) -> IngestResult:

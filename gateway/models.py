@@ -26,8 +26,34 @@ class AuthFailure(enum.Enum):
 class RejectReason(enum.Enum):
     """遥测负载层面的拒绝原因（认证通过之后）。"""
     MALFORMED_PAYLOAD = "malformed_payload"          # 负载结构非法
+    MISSING_FIELD = "missing_field"                  # 必填字段缺失
+    INVALID_FIELD_TYPE = "invalid_field_type"        # 字段类型不符
+    INVALID_FIELD_VALUE = "invalid_field_value"      # 字段取值非法
     UNKNOWN_PROTOCOL_VERSION = "unknown_protocol_version"  # 协议版本不支持
     STALE_TIMESTAMP = "stale_timestamp"              # 时间戳超出允许偏移
+
+
+class RejectionCategory(enum.Enum):
+    """排查视图的分类维度：所有未接受结论都归入且仅归入一类。"""
+    AUTH_FAILURE = "auth_failure"                    # 认证失败
+    PAYLOAD_NON_COMPLIANT = "payload_non_compliant"  # 负载不合规
+    UNKNOWN_PROTOCOL_VERSION = "unknown_protocol_version"  # 协议版本不支持
+    STALE_TIMESTAMP = "stale_timestamp"              # 时间戳超偏
+    DUPLICATE = "duplicate"                          # 重复（幂等忽略）
+    OUT_OF_ORDER = "out_of_order"                    # 乱序（不回退）
+
+
+#: RejectReason -> RejectionCategory 的确定映射。
+#: 字段缺失/类型不符/取值非法/结构非法统一归入“负载不合规”，
+#: 与其余拒绝原因（协议版本、时间戳）清楚区分。
+REJECT_REASON_CATEGORY: dict[RejectReason, RejectionCategory] = {
+    RejectReason.MALFORMED_PAYLOAD: RejectionCategory.PAYLOAD_NON_COMPLIANT,
+    RejectReason.MISSING_FIELD: RejectionCategory.PAYLOAD_NON_COMPLIANT,
+    RejectReason.INVALID_FIELD_TYPE: RejectionCategory.PAYLOAD_NON_COMPLIANT,
+    RejectReason.INVALID_FIELD_VALUE: RejectionCategory.PAYLOAD_NON_COMPLIANT,
+    RejectReason.UNKNOWN_PROTOCOL_VERSION: RejectionCategory.UNKNOWN_PROTOCOL_VERSION,
+    RejectReason.STALE_TIMESTAMP: RejectionCategory.STALE_TIMESTAMP,
+}
 
 
 class MessageFlag(enum.Enum):
@@ -104,6 +130,43 @@ class IngestResult:
     auth_failure: AuthFailure | None = None
     reject_reason: RejectReason | None = None
     applied_seq: int | None = None
+    detail: str = ""           # 命中的具体规则，如 "missing_field:seq"
+
+
+# ---------------------------------------------------------------------------
+# 批量补传
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class BatchItemResult:
+    """批内单条结论：index 为该条在原始提交中的下标。"""
+    index: int
+    result: IngestResult
+
+
+@dataclass(frozen=True)
+class BatchResult:
+    """整批结论。duplicate_batch=True 表示同一 batch_id 的重试，
+    items 为首次处理时缓存的结论，本次未重复生效。"""
+    batch_id: str
+    items: tuple[BatchItemResult, ...]
+    duplicate_batch: bool = False
+
+
+# ---------------------------------------------------------------------------
+# 排查视图
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class RejectionRecord:
+    """一条未接受上报的留痕：设备、分类、判定依据与原始内容。"""
+    device_id: str | None
+    category: RejectionCategory
+    detail: str                # 判定依据（具体规则/失败原因/标记）
+    message_id: str | None
+    seq: int | None
+    raw: Any                   # 原始内容，供排查回放
+    recorded_at: float
 
 
 # ---------------------------------------------------------------------------
