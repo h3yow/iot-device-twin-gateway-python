@@ -8,7 +8,7 @@ import uvicorn
 from fastapi import FastAPI
 from pydantic import BaseModel
 
-from gateway.models import TelemetryMessage
+from gateway.models import RejectCategory, TelemetryMessage
 from gateway.service import Gateway
 
 app = FastAPI(title="IoT Device Twin Gateway")
@@ -43,6 +43,33 @@ class TelemetryRequest(BaseModel):
 class DesiredRequest(BaseModel):
     desired: dict[str, Any]
     expected_version: int
+
+
+def _item_json(v) -> dict[str, Any]:
+    return {
+        "index": v.index,
+        "message_id": v.message_id,
+        "accepted": v.accepted,
+        "flags": [f.value for f in v.flags],
+        "reject_reason": v.reject_reason.value if v.reject_reason else None,
+        "payload_issue": v.payload_issue.value if v.payload_issue else None,
+        "issue_detail": v.issue_detail,
+        "applied_seq": v.applied_seq,
+    }
+
+
+def _record_json(rec) -> dict[str, Any]:
+    return {
+        "seq_no": rec.seq_no,
+        "received_at": rec.received_at,
+        "device_id": rec.device_id,
+        "category": rec.category.value,
+        "reason": rec.reason,
+        "detail": rec.detail,
+        "message_id": rec.message_id,
+        "msg_seq": rec.msg_seq,
+        "raw": rec.raw,
+    }
 
 
 @app.post("/devices")
@@ -80,8 +107,68 @@ def ingest(req: TelemetryRequest):
         "flags": [f.value for f in result.flags],
         "auth_failure": result.auth_failure.value if result.auth_failure else None,
         "reject_reason": result.reject_reason.value if result.reject_reason else None,
+        "payload_issue": result.payload_issue.value if result.payload_issue else None,
+        "issue_detail": result.issue_detail,
         "applied_seq": result.applied_seq,
     }
+
+
+@app.post("/telemetry/batch")
+def ingest_batch(body: dict[str, Any]):
+    """批量补传。入参不做严格 schema 绑定：任何离谱输入都返回结构化判定。"""
+    batch_id = body.get("batch_id")
+    device_id = body.get("device_id")
+    secret = body.get("secret")
+    items = body.get("items")
+    if not isinstance(device_id, str) or not device_id.strip():
+        return {"batch_id": batch_id if isinstance(batch_id, str) else None,
+                "auth_ok": False, "error": "malformed_batch_request",
+                "detail": "device_id: expected non-empty string", "items": []}
+    if not isinstance(secret, str) or not secret:
+        return {"batch_id": batch_id if isinstance(batch_id, str) else None,
+                "auth_ok": False, "error": "malformed_batch_request",
+                "detail": "secret: expected non-empty string", "items": []}
+    if batch_id is not None and not isinstance(batch_id, str):
+        return {"batch_id": None, "auth_ok": False,
+                "error": "malformed_batch_request",
+                "detail": "batch_id: expected string or null", "items": []}
+    if not isinstance(items, list):
+        return {"batch_id": batch_id, "auth_ok": False,
+                "error": "malformed_batch_request",
+                "detail": "items: expected a JSON array", "items": []}
+    result = gateway.ingest_batch(batch_id, device_id, secret, items, _now())
+    return {
+        "batch_id": result.batch_id,
+        "auth_ok": result.auth_ok,
+        "auth_failure": result.auth_failure.value if result.auth_failure else None,
+        "accepted_count": result.accepted_count,
+        "items": [_item_json(v) for v in result.items],
+    }
+
+
+@app.get("/rejections")
+def query_rejections(device_id: str | None = None,
+                     category: str | None = None,
+                     limit: int | None = None):
+    cat = None
+    if category is not None:
+        try:
+            cat = RejectCategory(category)
+        except ValueError:
+            return {"error": "unknown_category",
+                    "supported": [c.value for c in RejectCategory]}
+    if limit is not None and limit < 0:
+        limit = None
+    recs = gateway.rejections.query(device_id=device_id, category=cat,
+                                    limit=limit)
+    return {"capacity": gateway.rejections.capacity, "count": len(recs),
+            "records": [_record_json(r) for r in recs]}
+
+
+@app.get("/rejections/counts")
+def rejection_counts(device_id: str | None = None):
+    return {"device_id": device_id,
+            "counts": gateway.rejections.counts(device_id)}
 
 
 @app.get("/twin/{device_id}")

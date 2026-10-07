@@ -25,9 +25,25 @@ class AuthFailure(enum.Enum):
 
 class RejectReason(enum.Enum):
     """遥测负载层面的拒绝原因（认证通过之后）。"""
-    MALFORMED_PAYLOAD = "malformed_payload"          # 负载结构非法
+    MALFORMED_PAYLOAD = "malformed_payload"          # 负载不合规（含结构/字段/类型/取值）
     UNKNOWN_PROTOCOL_VERSION = "unknown_protocol_version"  # 协议版本不支持
     STALE_TIMESTAMP = "stale_timestamp"              # 时间戳超出允许偏移
+
+
+class PayloadIssue(enum.Enum):
+    """``MALFORMED_PAYLOAD`` 下可解释的细分子类（归类规则见 README）。"""
+    INVALID_STRUCTURE = "invalid_structure"  # 顶层/嵌套结构非法（非对象、键非法等）
+    MISSING_FIELD = "missing_field"          # 必填字段缺失或为空
+    TYPE_MISMATCH = "type_mismatch"          # 字段类型与协议契约不符
+    INVALID_VALUE = "invalid_value"          # 类型正确但取值不合法（如 seq<1、NaN）
+
+
+class RejectCategory(enum.Enum):
+    """排查视图使用的一级分类：每条拒绝恰好归入其中一类。"""
+    AUTH_FAILURE = "auth_failure"
+    MALFORMED_PAYLOAD = "malformed_payload"
+    UNKNOWN_PROTOCOL_VERSION = "unknown_protocol_version"
+    STALE_TIMESTAMP = "stale_timestamp"
 
 
 class MessageFlag(enum.Enum):
@@ -103,7 +119,37 @@ class IngestResult:
     flags: tuple[MessageFlag, ...] = ()
     auth_failure: AuthFailure | None = None
     reject_reason: RejectReason | None = None
+    payload_issue: PayloadIssue | None = None       # reject_reason=MALFORMED 时的细分子类
+    issue_detail: str = ""                          # 人类可读、可写入文档的命中规则说明
     applied_seq: int | None = None
+    message_id: str | None = None                   # 原始条目的幂等键（便于批量结果对位）
+    msg_seq: int | None = None                      # 原始条目序号（排查视图留痕用，含被拒绝值）
+
+
+@dataclass(frozen=True)
+class BatchItemResult:
+    """批量补传中单条上报的判定：索引与 message_id 用于和提交顺序对位。"""
+    index: int
+    message_id: str | None
+    accepted: bool
+    flags: tuple[MessageFlag, ...] = ()
+    reject_reason: RejectReason | None = None
+    payload_issue: PayloadIssue | None = None
+    issue_detail: str = ""
+    applied_seq: int | None = None
+
+
+@dataclass(frozen=True)
+class BatchResult:
+    """整批补传结论：批级认证结论 + 每条各自的判定。"""
+    batch_id: str | None
+    auth_ok: bool
+    auth_failure: AuthFailure | None = None
+    items: tuple[BatchItemResult, ...] = ()
+
+    @property
+    def accepted_count(self) -> int:
+        return sum(1 for i in self.items if i.accepted)
 
 
 # ---------------------------------------------------------------------------
@@ -125,3 +171,21 @@ class WriteResult:
     version: int = 0
     conflict: bool = False
     detail: str = ""
+
+
+# ---------------------------------------------------------------------------
+# 排查视图：被拒绝上报的留存记录
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class RejectionRecord:
+    """一次被拒绝上报的结构化留痕，供运维按设备/分类检索。"""
+    seq_no: int                          # 视图内单调递增的全局序号
+    received_at: float                   # 网关接收时刻（epoch 秒）
+    device_id: str | None
+    category: RejectCategory             # 一级分类
+    reason: str                          # 细分原因代码（AuthFailure/RejectReason/PayloadIssue 的值）
+    detail: str                          # 命中的具体规则说明
+    message_id: str | None = None
+    msg_seq: int | None = None
+    raw: Any = None                      # 原始上报内容的可序列化快照（可能被截断）
